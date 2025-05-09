@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Auth Test</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        .card {
+            border: 1px solid #ddd;
+            border-radius: 8px;
+            padding: 16px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        button {
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            padding: 10px 15px;
+            border-radius: 4px;
+            cursor: pointer;
+            margin: 5px;
+        }
+        button:hover {
+            background-color: #45a049;
+        }
+        pre {
+            background-color: #f5f5f5;
+            padding: 10px;
+            border-radius: 4px;
+            overflow-x: auto;
+        }
+        input {
+            padding: 8px;
+            margin: 5px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+        }
+    </style>
+</head>
+<body>
+    <h1>Authentication Test</h1>
+    
+    <div class="card">
+        <h2>Login</h2>
+        <div>
+            <input type="text" id="username" placeholder="Username" value="admin">
+            <input type="password" id="password" placeholder="Password" value="admin123">
+            <button onclick="login()">Login</button>
+        </div>
+    </div>
+
+    <div class="card">
+        <h2>Current User</h2>
+        <button onclick="getCurrentUser()">Get Current User</button>
+        <div id="current-user">Not logged in</div>
+    </div>
+
+    <div class="card">
+        <h2>Logout</h2>
+        <button onclick="logout()">Logout</button>
+    </div>
+    
+    <div class="card">
+        <h2>Test Endpoints</h2>
+        <button onclick="getDepartments()">Get Departments</button>
+        <button onclick="getLevels()">Get Levels</button>
+        <button onclick="getClasses()">Get Classes</button>
+        <button onclick="getTodaysLessons()">Get Today's Lessons</button>
+    </div>
+
+    <div class="card">
+        <h2>Results</h2>
+        <pre id="results">No results yet</pre>
+    </div>
+
+    <script>
+        // Helper to display results
+        function showResults(data) {
+            document.getElementById('results').textContent = 
+                typeof data === 'object' ? JSON.stringify(data, null, 2) : data;
+        }
+
+        // Login function
+        async function login() {
+            try {
+                const username = document.getElementById('username').value;
+                const password = document.getElementById('password').value;
+                
+                const response = await fetch('/api/login', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    credentials: 'include', // Important for cookies
+                    body: JSON.stringify({ username, password })
+                });
+                
+                const data = await response.json();
+                showResults(data);
+                
+                if (response.ok) {
+                    document.getElementById('current-user').textContent = 
+                        `Logged in as ${data.username} (${data.role})`;
+                }
+            } catch (error) {
+                showResults(`Error: ${error.message}`);
+            }
+        }
+
+        // Get current user
+        async function getCurrentUser() {
+            try {
+                const response = await fetch('/api/user', {
+                    credentials: 'include' // Important for cookies
+                });
+                
+                if (response.status === 401) {
+                    document.getElementById('current-user').textContent = 'Not logged in';
+                    showResults('Not logged in');
+                    return;
+                }
+                
+                const data = await response.json();
+                document.getElementById('current-user').textContent = 
+                    `Logged in as ${data.username} (${data.role})`;
+                showResults(data);
+            } catch (error) {
+                showResults(`Error: ${error.message}`);
+            }
+        }
+
+        // Logout function
+        async function logout() {
+            try {
+                const response = await fetch('/api/logout', {
+                    method: 'POST',
+                    credentials: 'include' // Important for cookies
+                });
+                
+                showResults('Logged out');
+                document.getElementById('current-user').textContent = 'Not logged in';
+            } catch (error) {
+                showResults(`Error: ${error.message}`);
+            }
+        }
+
+        // Test endpoints
+        async function getDepartments() {
+            try {
+                const response = await fetch('/api/departments', {
+                    credentials: 'include'
+                });
+                const data = await response.json();
+                showResults(data);
+            } catch (error) {
+                showResults(`Error: ${error.message}`);
+            }
+        }
+
+        async function getLevels() {
+            try {
+                const response = await fetch('/api/levels', {
+                    credentials: 'include'
+                });
+                const data = await response.json();
+                showResults(data);
+            } catch (error) {
+                showResults(`Error: ${error.message}`);
+            }
+        }
+
+        async function getClasses() {
+            try {
+                const response = await fetch('/api/classes', {
+                    credentials: 'include'
+                });
+                const data = await response.json();
+                showResults(data);
+            } catch (error) {
+                showResults(`Error: ${error.message}`);
+            }
+        }
+
+        async function getTodaysLessons() {
+            try {
+                const response = await fetch('/api/lessons/today', {
+                    credentials: 'include'
+                });
+                const data = await response.json();
+                showResults(data);
+            } catch (error) {
+                showResults(`Error: ${error.message}`);
+            }
+        }
+
+        // Check if user is already logged in
+        getCurrentUser();
+    </script>
+</body>
+</html>
