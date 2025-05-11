@@ -53,7 +53,7 @@ export default function AdminAttendanceRecords() {
   const [selectedDepartment, setSelectedDepartment] = useState<string>("");
   const [selectedClass, setSelectedClass] = useState<string>("");
   const [selectedLesson, setSelectedLesson] = useState<string>("");
-  const [selectedDate, setSelectedDate] = useState<Date | undefined>(undefined);
+  const [selectedDay, setSelectedDay] = useState<string>("");
   const [searchQuery, setSearchQuery] = useState("");
   const [currentPage, setCurrentPage] = useState(1);
   const [isViewDetailsOpen, setIsViewDetailsOpen] = useState(false);
@@ -96,7 +96,7 @@ export default function AdminAttendanceRecords() {
 
   // Fetch attendance records based on filters
   const { data: attendanceRecords = [], isLoading: attendanceLoading } = useQuery({
-    queryKey: ["/api/attendance", selectedLesson, selectedDate, searchQuery],
+    queryKey: ["/api/attendance", selectedLesson, selectedDay, searchQuery],
     queryFn: async () => {
       let url = "/api/attendance";
       const params = new URLSearchParams();
@@ -105,8 +105,8 @@ export default function AdminAttendanceRecords() {
         params.append("lessonId", selectedLesson);
       }
       
-      if (selectedDate) {
-        params.append("date", selectedDate.toISOString().split("T")[0]);
+      if (selectedDay) {
+        params.append("dayOfWeek", selectedDay);
       }
       
       if (searchQuery) {
@@ -121,7 +121,7 @@ export default function AdminAttendanceRecords() {
       if (!response.ok) throw new Error("Failed to fetch attendance records");
       return response.json();
     },
-    enabled: !!selectedLesson || !!selectedDate || !!searchQuery,
+    enabled: !!selectedLesson || !!selectedDay || !!searchQuery,
   });
 
   // Update attendance mutation
@@ -170,7 +170,7 @@ export default function AdminAttendanceRecords() {
     setSelectedDepartment("");
     setSelectedClass("");
     setSelectedLesson("");
-    setSelectedDate(undefined);
+    setSelectedDay("");
     setSearchQuery("");
   };
 
@@ -259,7 +259,7 @@ export default function AdminAttendanceRecords() {
                     <SelectItem value="all-lessons">All Lessons</SelectItem>
                     {lessons.map((lesson: any) => (
                       <SelectItem key={lesson.id} value={lesson.id.toString()}>
-                        {lesson.subject} - {format(new Date(lesson.startTime), "MMM d, yyyy")}
+                        {lesson.subject} - {lesson.dayOfWeek || "Unknown day"}
                       </SelectItem>
                     ))}
                   </SelectContent>
@@ -267,29 +267,25 @@ export default function AdminAttendanceRecords() {
               </div>
               
               <div>
-                <label className="block text-sm font-medium text-neutral-400 mb-2">Date</label>
-                <Popover>
-                  <PopoverTrigger asChild>
-                    <Button
-                      variant={"outline"}
-                      className={cn(
-                        "w-full justify-start text-left font-normal",
-                        !selectedDate && "text-muted-foreground"
-                      )}
-                    >
-                      <CalendarIcon className="mr-2 h-4 w-4" />
-                      {selectedDate ? format(selectedDate, "PPP") : <span>Pick a date</span>}
-                    </Button>
-                  </PopoverTrigger>
-                  <PopoverContent className="w-auto p-0" align="start">
-                    <Calendar
-                      mode="single"
-                      selected={selectedDate}
-                      onSelect={setSelectedDate}
-                      initialFocus
-                    />
-                  </PopoverContent>
-                </Popover>
+                <label className="block text-sm font-medium text-neutral-400 mb-2">Day of Week</label>
+                <Select
+                  value={selectedDay}
+                  onValueChange={setSelectedDay}
+                >
+                  <SelectTrigger className="w-full">
+                    <SelectValue placeholder="Select day" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="">All days</SelectItem>
+                    <SelectItem value="Monday">Monday</SelectItem>
+                    <SelectItem value="Tuesday">Tuesday</SelectItem>
+                    <SelectItem value="Wednesday">Wednesday</SelectItem>
+                    <SelectItem value="Thursday">Thursday</SelectItem>
+                    <SelectItem value="Friday">Friday</SelectItem>
+                    <SelectItem value="Saturday">Saturday</SelectItem>
+                    <SelectItem value="Sunday">Sunday</SelectItem>
+                  </SelectContent>
+                </Select>
               </div>
               
               <div>
@@ -319,7 +315,7 @@ export default function AdminAttendanceRecords() {
             <h3 className="text-lg font-medium text-neutral-500">Attendance Records</h3>
           </div>
           <CardContent className="p-6">
-            {!selectedLesson && !selectedDate && !searchQuery ? (
+            {!selectedLesson && !selectedDay && !searchQuery ? (
               <p className="text-center py-8 text-neutral-400">
                 Please select at least one filter to view attendance records.
               </p>
@@ -353,7 +349,7 @@ export default function AdminAttendanceRecords() {
                         <TableCell className="font-medium">{record.studentName}</TableCell>
                         <TableCell>{record.className}</TableCell>
                         <TableCell>{record.subject}</TableCell>
-                        <TableCell>{format(new Date(record.lessonDate), "MMM d, yyyy")}</TableCell>
+                        <TableCell>{record.dayOfWeek || "Unknown day"}</TableCell>
                         <TableCell>
                           <span
                             className={`px-2 py-1 text-xs rounded-full ${
@@ -366,7 +362,7 @@ export default function AdminAttendanceRecords() {
                           </span>
                         </TableCell>
                         <TableCell>
-                          {record.markedAt
+                          {record.markedAt && !isNaN(new Date(record.markedAt).getTime())
                             ? format(new Date(record.markedAt), "h:mm a")
                             : "N/A"}
                         </TableCell>
@@ -478,15 +474,17 @@ export default function AdminAttendanceRecords() {
               
               <div className="grid grid-cols-2 gap-2">
                 <div>
-                  <p className="text-sm text-neutral-400">Date</p>
+                  <p className="text-sm text-neutral-400">Day</p>
                   <p className="font-medium">
-                    {format(new Date(selectedRecord.lessonDate), "MMMM d, yyyy")}
+                    {selectedRecord.dayOfWeek || "Unknown day"}
                   </p>
                 </div>
                 <div>
                   <p className="text-sm text-neutral-400">Time</p>
                   <p className="font-medium">
-                    {format(new Date(selectedRecord.lessonDate), "h:mm a")}
+                    {selectedRecord.startTimeMinutes !== undefined 
+                      ? `${Math.floor(selectedRecord.startTimeMinutes / 60)}:${(selectedRecord.startTimeMinutes % 60).toString().padStart(2, '0')}`
+                      : "N/A"}
                   </p>
                 </div>
               </div>
@@ -495,7 +493,7 @@ export default function AdminAttendanceRecords() {
                 <div>
                   <p className="text-sm text-neutral-400">Marked At</p>
                   <p className="font-medium">
-                    {selectedRecord.markedAt
+                    {selectedRecord.markedAt && !isNaN(new Date(selectedRecord.markedAt).getTime())
                       ? format(new Date(selectedRecord.markedAt), "h:mm a")
                       : "N/A"}
                   </p>

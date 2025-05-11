@@ -4,6 +4,7 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { ThemeProvider } from "next-themes";
 import NotFound from "@/pages/not-found";
 import AuthPage from "@/pages/auth-page";
+import ProfilePage from "@/pages/profile-page";
 import { ProtectedRoute } from "./lib/protected-route";
 
 // Student pages
@@ -17,6 +18,7 @@ import TeacherClasses from "@/pages/teacher/classes";
 import TeacherLessons from "@/pages/teacher/lessons";
 import TeacherAttendanceRecords from "@/pages/teacher/attendance-records";
 import CreateLesson from "@/pages/teacher/create-lesson";
+import BulkAttendance from "@/pages/teacher/bulk-attendance";
 
 // Admin pages
 import AdminDashboard from "@/pages/admin/dashboard";
@@ -48,6 +50,7 @@ function Router() {
       <ProtectedRoute path="/teacher/lessons" component={TeacherLessons} allowedRoles={["teacher", "admin"]} />
       <ProtectedRoute path="/teacher/create-lesson" component={CreateLesson} allowedRoles={["teacher", "admin"]} />
       <ProtectedRoute path="/teacher/attendance-records" component={TeacherAttendanceRecords} allowedRoles={["teacher", "admin"]} />
+      <ProtectedRoute path="/teacher/bulk-attendance" component={BulkAttendance} allowedRoles={["teacher", "admin"]} />
 
       {/* Admin routes */}
       <ProtectedRoute path="/admin" component={AdminDashboard} allowedRoles={["admin"]} />
@@ -60,6 +63,9 @@ function Router() {
       <ProtectedRoute path="/admin/system-settings" component={AdminSystemSettings} allowedRoles={["admin"]} />
       <ProtectedRoute path="/admin/students" component={AdminStudents} allowedRoles={["admin"]} />
       <ProtectedRoute path="/admin/students/:id/report" component={StudentReport} allowedRoles={["admin"]} />
+      
+      {/* Profile page - accessible to all authenticated users */}
+      <ProtectedRoute path="/profile" component={ProfilePage} allowedRoles={["admin", "teacher", "student"]} />
 
       {/* Fallback to 404 */}
       <Route component={NotFound} />

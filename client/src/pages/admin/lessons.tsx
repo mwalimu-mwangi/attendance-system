@@ -451,7 +451,7 @@ export default function AdminLessons() {
             }}>
               <DialogTrigger asChild>
                 <Button className="px-4 py-2 bg-primary text-white text-sm rounded-md flex items-center">
-                  <span className="material-icons text-sm mr-1">add</span> Add Lesson
+                  <span className="mr-1">+</span> Add Lesson
                 </Button>
               </DialogTrigger>
               <DialogContent className="sm:max-w-[550px] max-h-[85vh] overflow-y-auto">

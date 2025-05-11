@@ -270,17 +270,23 @@ export default function AdminClasses() {
         
         <Card>
           <div className="px-6 py-4 border-b border-neutral-200 flex justify-between items-center">
-            <Tabs value={activeTab} onValueChange={setActiveTab}>
-              <TabsList>
-                <TabsTrigger value="all">All Departments</TabsTrigger>
-                {!departmentsLoading &&
-                  departments.map((dept: any) => (
-                    <TabsTrigger key={dept.id} value={dept.id.toString()}>
-                      {dept.name}
-                    </TabsTrigger>
-                  ))}
-              </TabsList>
-            </Tabs>
+            <div className="flex items-center">
+              <p className="mr-2 text-sm font-medium">Department:</p>
+              <Select value={activeTab} onValueChange={setActiveTab}>
+                <SelectTrigger className="w-[200px]">
+                  <SelectValue placeholder="Select Department" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">All Departments</SelectItem>
+                  {!departmentsLoading &&
+                    departments.map((dept: any) => (
+                      <SelectItem key={dept.id} value={dept.id.toString()}>
+                        {dept.name}
+                      </SelectItem>
+                    ))}
+                </SelectContent>
+              </Select>
+            </div>
             
             <Dialog open={isAddDialogOpen} onOpenChange={(isOpen) => {
               setIsAddDialogOpen(isOpen);
@@ -439,14 +445,23 @@ export default function AdminClasses() {
                           : "Unknown"}
                       </TableCell>
                       <TableCell>
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          onClick={() => handleViewStudents(classItem)}
-                          className="flex items-center"
-                        >
-                          <Users className="h-4 w-4 mr-1" /> View Students
-                        </Button>
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center space-x-2 mr-4">
+                            <Users className="h-4 w-4 text-muted-foreground" />
+                            <span>{classItem.studentCount || 0} Students</span>
+                          </div>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => {
+                              // Navigate to lessons page filtered by this class
+                              setLocation(`/admin/lessons?classId=${classItem.id}`);
+                            }}
+                            className="flex items-center"
+                          >
+                            View Lessons
+                          </Button>
+                        </div>
                       </TableCell>
                       <TableCell>
                         <div className="flex space-x-2">

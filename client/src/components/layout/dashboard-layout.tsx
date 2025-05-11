@@ -18,6 +18,7 @@ import {
   Building2,
   GraduationCap,
   School,
+  UserCircle,
   Settings
 } from "lucide-react";
 
@@ -129,6 +130,12 @@ const sidebarItems: SidebarItem[] = [
     label: "System Settings",
     href: "/admin/system-settings",
     roles: ["admin"],
+  },
+  {
+    icon: <UserCircle size={20} />,
+    label: "My Profile",
+    href: "/profile",
+    roles: ["admin", "teacher", "student"],
   },
 ];
 
