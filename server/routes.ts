@@ -1,7 +1,7 @@
 import type { Express } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
-import { setupAuth, isAdmin, isTeacher, isAuthenticated, isStudent } from "./auth";
+import { setupAuth, isAdmin, isTeacher, isAuthenticated, isStudent, hashPassword, comparePasswords } from "./auth";
 import { ZodError } from "zod";
 import { fromZodError } from "zod-validation-error";
 import {
@@ -14,6 +14,9 @@ import {
 } from "@shared/schema";
 import { addMinutes, isPast } from "date-fns";
 import { seedDatabase } from "./seed";
+import { addTestData } from "./test-data";
+import { clearAllData } from "./clear-data";
+import { createBackup, restoreFromBackup, listBackups, deleteBackup } from "./backup-restore";
 
 export async function registerRoutes(app: Express): Promise<Server> {
   // Setup authentication routes
@@ -24,6 +27,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
   
   // Seed the database with initial data
   await seedDatabase();
+  
+  // Add test data for development
+  await addTestData();
 
   // ==== ADMIN ROUTES ====
 
@@ -164,8 +170,31 @@ export async function registerRoutes(app: Express): Promise<Server> {
     const departmentId = req.query.departmentId ? parseInt(req.query.departmentId as string) : undefined;
     const levelId = req.query.levelId ? parseInt(req.query.levelId as string) : undefined;
     
-    const classes = await storage.getAllClasses(departmentId, levelId);
-    res.json(classes);
+    try {
+      // Get all classes
+      const classes = await storage.getAllClasses(departmentId, levelId);
+      
+      // Get all users to count students per class
+      const allUsers = await storage.getAllUsers();
+      
+      // Enhance classes with student count
+      const classesWithStudentCount = classes.map(classItem => {
+        // Count students belonging to this class
+        const studentCount = allUsers.filter(user => 
+          user.role === "student" && user.classId === classItem.id
+        ).length;
+        
+        return {
+          ...classItem,
+          studentCount
+        };
+      });
+      
+      res.json(classesWithStudentCount);
+    } catch (error) {
+      console.error("Error fetching classes with student count:", error);
+      res.status(500).json({ message: "Failed to fetch classes" });
+    }
   });
   
   app.get("/api/classes/:id", async (req, res) => {
@@ -300,6 +329,79 @@ export async function registerRoutes(app: Express): Promise<Server> {
       next(error);
     }
   });
+  
+  // Teacher-Department relationship routes
+  app.get("/api/teachers/:id/departments", isAuthenticated, async (req, res) => {
+    const teacherId = parseInt(req.params.id);
+    
+    // Only admin or the teacher themselves can see their department assignments
+    if (req.user?.role !== "admin" && req.user?.id !== teacherId) {
+      return res.status(403).json({ message: "Unauthorized" });
+    }
+    
+    const teacherDepts = await storage.getTeacherDepartments(teacherId);
+    res.json(teacherDepts);
+  });
+  
+  app.post("/api/teachers/:id/departments", isAdmin, async (req, res, next) => {
+    try {
+      const teacherId = parseInt(req.params.id);
+      const { departmentId } = req.body;
+      
+      if (!departmentId) {
+        return res.status(400).json({ message: "Department ID is required" });
+      }
+      
+      // Verify teacher exists
+      const teacher = await storage.getUser(teacherId);
+      if (!teacher || teacher.role !== "teacher") {
+        return res.status(404).json({ message: "Teacher not found" });
+      }
+      
+      // Verify department exists
+      const department = await storage.getDepartment(departmentId);
+      if (!department) {
+        return res.status(404).json({ message: "Department not found" });
+      }
+      
+      // Add teacher to department
+      const relation = await storage.addTeacherToDepartment(teacherId, departmentId);
+      res.status(201).json(relation);
+    } catch (error) {
+      next(error);
+    }
+  });
+  
+  app.delete("/api/teachers/:teacherId/departments/:departmentId", isAdmin, async (req, res, next) => {
+    try {
+      const teacherId = parseInt(req.params.teacherId);
+      const departmentId = parseInt(req.params.departmentId);
+      
+      // Remove teacher from department
+      const success = await storage.removeTeacherFromDepartment(teacherId, departmentId);
+      
+      if (!success) {
+        return res.status(404).json({ message: "Teacher-department relationship not found" });
+      }
+      
+      res.status(204).end();
+    } catch (error) {
+      next(error);
+    }
+  });
+  
+  app.get("/api/departments/:id/teachers", isAuthenticated, async (req, res) => {
+    const departmentId = parseInt(req.params.id);
+    
+    // Verify department exists
+    const department = await storage.getDepartment(departmentId);
+    if (!department) {
+      return res.status(404).json({ message: "Department not found" });
+    }
+    
+    const teachers = await storage.getTeachersByDepartment(departmentId);
+    res.json(teachers);
+  });
 
   // System settings routes
   app.get("/api/system-settings", isAdmin, async (req, res) => {
@@ -323,7 +425,60 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   // ==== TEACHER ROUTES ====
 
-  // Lesson routes for teachers
+  // Lesson routes - ORDER MATTERS FOR EXPRESS ROUTING!
+  // Specific routes must come before parameterized routes to avoid conflicts
+  
+  // Get today's lessons based on user role
+  app.get("/api/lessons/today", isAuthenticated, async (req, res) => {
+    if (req.user.role === "student") {
+      // If student has no classId assigned, return empty array
+      if (!req.user.classId) {
+        return res.json([]);
+      }
+      const lessons = await storage.getTodaysLessons(req.user.classId);
+      return res.json(lessons);
+    } else if (req.user.role === "teacher") {
+      const lessons = await storage.getTodaysLessonsForTeacher(req.user.id);
+      return res.json(lessons);
+    } else {
+      // Admin can see all today's lessons
+      const classId = req.query.classId ? parseInt(req.query.classId as string) : undefined;
+      const teacherId = req.query.teacherId ? parseInt(req.query.teacherId as string) : undefined;
+      const lessons = await storage.getTodaysLessons(classId, teacherId);
+      return res.json(lessons);
+    }
+  });
+  
+  // Get all lessons for a student (past and future)
+  app.get("/api/lessons/student", isAuthenticated, async (req, res) => {
+    if (req.user.role === "student") {
+      // Get all lessons for the student's class
+      if (!req.user.classId) {
+        return res.json([]);
+      }
+      const lessons = await storage.getAllLessons(req.user.classId);
+      return res.json(lessons);
+    } else if (req.user.role === "teacher") {
+      // Get all lessons for the teacher
+      const lessons = await storage.getAllLessons(undefined, req.user.id);
+      return res.json(lessons);
+    } else {
+      // Admin can filter by student
+      const studentId = req.query.studentId ? parseInt(req.query.studentId as string) : undefined;
+      if (studentId) {
+        const student = await storage.getUser(studentId);
+        if (student && student.classId) {
+          const lessons = await storage.getAllLessons(student.classId);
+          return res.json(lessons);
+        }
+      }
+      // If no student ID provided or invalid, return all lessons
+      const lessons = await storage.getAllLessons();
+      return res.json(lessons);
+    }
+  });
+  
+  // Get all lessons with optional filters
   app.get("/api/lessons", isAuthenticated, async (req, res) => {
     const classId = req.query.classId ? parseInt(req.query.classId as string) : undefined;
     const teacherId = req.query.teacherId ? parseInt(req.query.teacherId as string) : undefined;
@@ -345,6 +500,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     res.json(lessons);
   });
   
+  // Get lesson by ID - THIS MUST COME AFTER OTHER /api/lessons/* ROUTES
   app.get("/api/lessons/:id", isAuthenticated, async (req, res) => {
     const id = parseInt(req.params.id);
     
@@ -385,6 +541,20 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const lessonData = req.user.role === "teacher" 
         ? { ...req.body, teacherId: req.user.id }
         : insertLessonSchema.parse(req.body);
+      
+      // Check for existing lessons with the same attributes
+      const existingLessons = await storage.getAllLessons(lessonData.classId, lessonData.teacherId);
+      const potentialDuplicate = existingLessons.find(existing => 
+        existing.dayOfWeek === lessonData.dayOfWeek &&
+        existing.subject === lessonData.subject &&
+        existing.startTimeMinutes === lessonData.startTimeMinutes
+      );
+      
+      if (potentialDuplicate) {
+        return res.status(400).json({ 
+          message: "A lesson with the same day, subject, and start time already exists for this class and teacher" 
+        });
+      }
       
       const lesson = await storage.createLesson(lessonData);
       res.status(201).json(lesson);
@@ -499,60 +669,225 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  // ==== STUDENT ROUTES ====
-
-  // Get today's lessons for student
-  app.get("/api/lessons/today", isAuthenticated, async (req, res) => {
-    if (req.user.role === "student") {
-      // If student has no classId assigned, return empty array
-      if (!req.user.classId) {
-        return res.json([]);
+  // Instant lesson creation - available to both admin and teacher roles
+  app.post("/api/instant-lesson", isAuthenticated, async (req, res, next) => {
+    try {
+      const { subject, classId, location, durationMinutes, attendanceWindowMinutes } = req.body;
+      
+      // We can safely use req.user here since isAuthenticated middleware ensures it exists
+      if (req.user.role !== 'admin' && req.user.role !== 'teacher') {
+        return res.status(403).json({ message: "Unauthorized. Only admins and teachers can create instant lessons" });
       }
-      const lessons = await storage.getTodaysLessons(req.user.classId);
-      return res.json(lessons);
-    } else if (req.user.role === "teacher") {
-      const lessons = await storage.getTodaysLessonsForTeacher(req.user.id);
-      return res.json(lessons);
-    } else {
-      // Admin can see all today's lessons
-      const classId = req.query.classId ? parseInt(req.query.classId as string) : undefined;
-      const teacherId = req.query.teacherId ? parseInt(req.query.teacherId as string) : undefined;
-      const lessons = await storage.getTodaysLessons(classId, teacherId);
-      return res.json(lessons);
+      
+      // Validate required fields
+      if (!subject || !classId) {
+        return res.status(400).json({ message: "Subject and classId are required fields" });
+      }
+      
+      // For teachers, ensure they are assigned to the class's department
+      if (req.user.role === 'teacher') {
+        const classInfo = await storage.getClass(parseInt(classId));
+        if (!classInfo) {
+          return res.status(404).json({ message: "Class not found" });
+        }
+        
+        const teacherDepartments = await storage.getTeacherDepartments(req.user.id);
+        const departmentIds = teacherDepartments.map(td => td.departmentId);
+        
+        if (!departmentIds.includes(classInfo.departmentId)) {
+          return res.status(403).json({ 
+            message: "You can only create instant lessons for classes in your departments" 
+          });
+        }
+      }
+      
+      // Create the instant lesson for the current time
+      const now = new Date();
+      const currentDay = now.getDay(); // 0-6 (Sunday-Saturday)
+      
+      // Calculate minutes from midnight for current time
+      const currentHour = now.getHours();
+      const currentMinute = now.getMinutes();
+      const startTimeMinutes = (currentHour * 60) + currentMinute;
+      
+      const lessonData = {
+        subject,
+        classId: parseInt(classId),
+        teacherId: req.user.id,
+        dayOfWeek: currentDay,
+        startTimeMinutes,
+        durationMinutes: durationMinutes ? parseInt(durationMinutes) : 60, // Default to 1 hour if not specified
+        location: location || "Default Location",
+        attendanceWindowMinutes: attendanceWindowMinutes ? parseInt(attendanceWindowMinutes) : 30, // Default to 30 min
+        isActive: true,
+        lessonCount: 0
+      };
+      
+      const lesson = await storage.createLesson(lessonData);
+      res.status(201).json(lesson);
+    } catch (error) {
+      console.error("Error creating instant lesson:", error);
+      next(error);
     }
   });
   
-  // Get all lessons for a student (past and future)
-  app.get("/api/lessons/student", isAuthenticated, async (req, res) => {
-    if (req.user.role === "student") {
-      // Get all lessons for the student's class
-      if (!req.user.classId) {
-        return res.json([]);
+  // Teacher student management APIs
+  app.post("/api/teacher/register-student", isTeacher, async (req, res, next) => {
+    try {
+      const { studentId, classId } = req.body;
+      
+      if (!studentId || !classId) {
+        return res.status(400).json({ message: "studentId and classId are required" });
       }
-      const lessons = await storage.getAllLessons(req.user.classId);
-      return res.json(lessons);
-    } else if (req.user.role === "teacher") {
-      // Get all lessons for the teacher
-      const lessons = await storage.getAllLessons(undefined, req.user.id);
-      return res.json(lessons);
-    } else {
-      // Admin can filter by student
-      const studentId = req.query.studentId ? parseInt(req.query.studentId as string) : undefined;
-      if (studentId) {
-        const student = await storage.getUser(studentId);
-        if (student && student.classId) {
-          const lessons = await storage.getAllLessons(student.classId);
-          return res.json(lessons);
+      
+      // Get the class info
+      const classInfo = await storage.getClass(parseInt(classId));
+      if (!classInfo) {
+        return res.status(404).json({ message: "Class not found" });
+      }
+      
+      // Check if teacher is authorized to manage this class
+      // isTeacher middleware ensures req.user exists and is a teacher
+      const teacherDepartments = await storage.getTeacherDepartments(req.user.id);
+      const departmentIds = teacherDepartments.map(td => td.departmentId);
+      
+      if (!departmentIds.includes(classInfo.departmentId)) {
+        return res.status(403).json({ 
+          message: "You can only manage students for classes in your departments" 
+        });
+      }
+      
+      // Get the student
+      const student = await storage.getUser(parseInt(studentId));
+      if (!student) {
+        return res.status(404).json({ message: "Student not found" });
+      }
+      
+      if (student.role !== "student") {
+        return res.status(400).json({ message: "User is not a student" });
+      }
+      
+      // Update student's class assignment
+      const updatedStudent = await storage.updateUser(parseInt(studentId), {
+        classId: parseInt(classId),
+        departmentId: classInfo.departmentId,
+        levelId: classInfo.levelId
+      });
+      
+      if (!updatedStudent) {
+        return res.status(500).json({ message: "Failed to update student" });
+      }
+      
+      res.json({
+        message: "Student registered to class successfully",
+        student: {
+          id: updatedStudent.id,
+          username: updatedStudent.username,
+          fullName: updatedStudent.fullName,
+          role: updatedStudent.role,
+          classId: updatedStudent.classId,
+          departmentId: updatedStudent.departmentId,
+          levelId: updatedStudent.levelId
         }
-      }
-      return res.status(400).json({ message: "Invalid student ID" });
+      });
+      
+    } catch (error) {
+      console.error("Error registering student to class:", error);
+      next(error);
     }
   });
+  
+  app.post("/api/teacher/deregister-student", isTeacher, async (req, res, next) => {
+    try {
+      const { studentId } = req.body;
+      
+      if (!studentId) {
+        return res.status(400).json({ message: "studentId is required" });
+      }
+      
+      // Get the student
+      const student = await storage.getUser(parseInt(studentId));
+      if (!student) {
+        return res.status(404).json({ message: "Student not found" });
+      }
+      
+      if (student.role !== "student") {
+        return res.status(400).json({ message: "User is not a student" });
+      }
+      
+      if (!student.classId) {
+        return res.status(400).json({ message: "Student is not registered to any class" });
+      }
+      
+      // Get the class info to check permissions
+      const classInfo = await storage.getClass(student.classId);
+      if (!classInfo) {
+        return res.status(404).json({ message: "Class not found" });
+      }
+      
+      // Check if teacher is authorized to manage this class
+      // isTeacher middleware ensures req.user exists and is a teacher
+      const teacherDepartments = await storage.getTeacherDepartments(req.user.id);
+      const departmentIds = teacherDepartments.map(td => td.departmentId);
+      
+      if (!departmentIds.includes(classInfo.departmentId)) {
+        return res.status(403).json({ 
+          message: "You can only manage students for classes in your departments" 
+        });
+      }
+      
+      // Update student to remove class assignment
+      const updatedStudent = await storage.updateUser(parseInt(studentId), {
+        classId: null,
+        departmentId: null,
+        levelId: null
+      });
+      
+      if (!updatedStudent) {
+        return res.status(500).json({ message: "Failed to update student" });
+      }
+      
+      res.json({
+        message: "Student deregistered from class successfully",
+        student: {
+          id: updatedStudent.id,
+          username: updatedStudent.username,
+          fullName: updatedStudent.fullName,
+          role: updatedStudent.role,
+          classId: updatedStudent.classId,
+          departmentId: updatedStudent.departmentId,
+          levelId: updatedStudent.levelId
+        }
+      });
+      
+    } catch (error) {
+      console.error("Error deregistering student from class:", error);
+      next(error);
+    }
+  });
+
+  // API to get teacher departments
+  app.get("/api/teacher/departments", isTeacher, async (req, res) => {
+    try {
+      // isTeacher middleware ensures req.user exists and is a teacher
+      const teacherDepartments = await storage.getTeacherDepartments(req.user.id);
+      res.json(teacherDepartments);
+    } catch (error) {
+      console.error("Error fetching teacher departments:", error);
+      res.status(500).json({ message: "Internal server error" });
+    }
+  });
+
+  // ==== STUDENT ROUTES ====
+
+  // Student routes have been moved to the top of the file
+  // to ensure proper route order in Express
 
   // Attendance routes
   app.get("/api/attendance", isAuthenticated, async (req, res) => {
     const lessonId = req.query.lessonId ? parseInt(req.query.lessonId as string) : undefined;
     const studentId = req.query.studentId ? parseInt(req.query.studentId as string) : undefined;
+    const dayOfWeek = req.query.dayOfWeek ? req.query.dayOfWeek as string : undefined;
     
     // If user is a student, limit to their attendance
     if (req.user.role === "student" && !studentId) {
@@ -561,20 +896,61 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
     
     // Teacher can see attendance for their lessons
-    if (req.user.role === "teacher" && lessonId) {
-      const lesson = await storage.getLesson(lessonId);
-      if (lesson && lesson.teacherId === req.user.id) {
-        const attendance = await storage.getAttendanceByLesson(lessonId, studentId);
-        return res.json(attendance);
+    if (req.user.role === "teacher") {
+      if (lessonId) {
+        const lesson = await storage.getLesson(lessonId);
+        if (lesson && lesson.teacherId === req.user.id) {
+          const attendance = await storage.getAttendanceByLesson(lessonId, studentId);
+          return res.json(attendance);
+        }
+      } else if (dayOfWeek) {
+        // Get attendance for lessons on specific day
+        const dayNum = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"].indexOf(dayOfWeek);
+        if (dayNum >= 0) {
+          // Get lessons for this teacher on specific day
+          const lessons = await storage.getAllLessons(undefined, req.user.id);
+          const filteredLessons = lessons.filter(lesson => lesson.dayOfWeek === dayNum);
+          
+          // Collect attendance for all filtered lessons
+          const attendanceRecords = [];
+          for (const lesson of filteredLessons) {
+            const records = await storage.getAttendanceByLesson(lesson.id, studentId);
+            attendanceRecords.push(...records);
+          }
+          return res.json(attendanceRecords);
+        }
       }
     }
     
     // Admin can see all attendance
     if (req.user.role === "admin") {
-      const attendance = lessonId 
-        ? await storage.getAttendanceByLesson(lessonId, studentId)
-        : await storage.getAttendanceByStudent(studentId!);
-      return res.json(attendance);
+      if (lessonId) {
+        const attendance = await storage.getAttendanceByLesson(lessonId, studentId);
+        return res.json(attendance);
+      } else if (dayOfWeek) {
+        // Filter attendance by day of week
+        const dayNum = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"].indexOf(dayOfWeek);
+        if (dayNum >= 0) {
+          const lessons = await storage.getAllLessons();
+          const filteredLessons = lessons.filter(lesson => lesson.dayOfWeek === dayNum);
+          
+          // Collect attendance for all filtered lessons
+          const attendanceRecords = [];
+          for (const lesson of filteredLessons) {
+            const records = await storage.getAttendanceByLesson(lesson.id, studentId);
+            attendanceRecords.push(...records);
+          }
+          return res.json(attendanceRecords);
+        }
+        return res.json([]);
+      } else if (studentId) {
+        const attendance = await storage.getAttendanceByStudent(studentId);
+        return res.json(attendance);
+      } else {
+        // No filters, return all attendance
+        const attendance = await storage.getAllAttendance();
+        return res.json(attendance);
+      }
     }
     
     res.status(403).json({ message: "Unauthorized to view this attendance data" });
@@ -583,6 +959,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.post("/api/attendance", isAuthenticated, async (req, res, next) => {
     try {
       const attendanceData = insertAttendanceSchema.parse(req.body);
+      const forceAttendance = req.query.force === 'true'; // Allow forcing attendance regardless of window
       
       // Check if the lesson exists
       const lesson = await storage.getLesson(attendanceData.lessonId);
@@ -590,18 +967,93 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return res.status(404).json({ message: "Lesson not found" });
       }
       
+      // Get system settings for default values
+      const systemSettings = await storage.getSystemSettings();
+      
       // Check if attendance window is still open
       const now = new Date();
-      const attendanceWindowEnd = addMinutes(
-        new Date(lesson.startTime), 
-        lesson.attendanceWindowMinutes
-      );
       
-      if (isPast(attendanceWindowEnd) && lesson.isActive) {
-        return res.status(403).json({ 
-          message: "Attendance window has closed",
-          closedAt: attendanceWindowEnd
+      // Calculate the start time for the current/most recent occurrence of this lesson
+      const currentDayOfWeek = now.getDay(); // 0-6, 0 is Sunday
+      const daysUntilNext = (lesson.dayOfWeek - currentDayOfWeek + 7) % 7;
+      
+      // If the lesson is not today, we'll allow attendance marking for administration purposes
+      let lessonDate = new Date(now);
+      if (lesson.dayOfWeek !== currentDayOfWeek) {
+        // For non-admins, only allow marking attendance on the actual day unless it's for past lessons
+        if (req.user.role === "student" && daysUntilNext !== 0) {
+          // Only admin/teacher can mark attendance for other days
+          if (daysUntilNext > 0) {
+            return res.status(403).json({ 
+              message: "Cannot mark attendance for future lessons"
+            });
+          }
+        }
+        
+        // Set the date to the most recent occurrence of this day of week
+        lessonDate.setDate(now.getDate() - ((currentDayOfWeek - lesson.dayOfWeek + 7) % 7));
+      }
+      
+      // Set the time from startTimeMinutes
+      const startHours = Math.floor(lesson.startTimeMinutes / 60);
+      const startMinutes = lesson.startTimeMinutes % 60;
+      lessonDate.setHours(startHours, startMinutes, 0, 0);
+      
+      // Check if this is an instant lesson created recently
+      const isInstantLesson = lesson.createdAt && 
+        (now.getTime() - new Date(lesson.createdAt).getTime() < 24 * 60 * 60 * 1000);
+      
+      // For instant lessons, use a different window calculation
+      let preClassWindow, lessonEndTime;
+      
+      if (isInstantLesson) {
+        // For instant lessons, attendance window starts immediately at creation time
+        preClassWindow = new Date(lesson.createdAt || now);
+        
+        // And ends after the configured attendance window duration
+        lessonEndTime = new Date(preClassWindow);
+        lessonEndTime.setMinutes(lessonEndTime.getMinutes() + (lesson.attendanceWindowMinutes || 30));
+        
+        console.log("Instant lesson detected, attendance window:", {
+          createdAt: lesson.createdAt,
+          preClassWindow,
+          lessonEndTime,
+          now
         });
+      } else {
+        // Regular lessons: calculate pre-class window (10 minutes before class starts)
+        preClassWindow = new Date(lessonDate);
+        preClassWindow.setMinutes(preClassWindow.getMinutes() - 10);
+        
+        // Calculate end of lesson time
+        lessonEndTime = new Date(lessonDate);
+        lessonEndTime.setMinutes(lessonEndTime.getMinutes() + lesson.durationMinutes);
+      }
+      
+      // Allow attendance marking from the calculated window start until the window end
+      // Only enforce window for students, allow teachers and admins to mark anytime with force parameter
+      if (req.user && req.user.role === "student" && (now < preClassWindow || now > lessonEndTime) && lesson.isActive && !forceAttendance) {
+        return res.status(403).json({ 
+          message: "Attendance window is not open",
+          opensAt: preClassWindow,
+          closesAt: lessonEndTime,
+          currentTime: now,
+          isInstantLesson: isInstantLesson
+        });
+      }
+      
+      // Allow teachers and admins to override the attendance window
+      if (req.user && (req.user.role === "teacher" || req.user.role === "admin") && !forceAttendance) {
+        // Provide warning but still allow the operation
+        if (now < preClassWindow || now > lessonEndTime) {
+          // This is just a warning - the attendance will still be marked
+          console.log("Attendance marked outside the standard window");
+        }
+      }
+      
+      // If user is not authenticated, reject the request
+      if (!req.user) {
+        return res.status(401).json({ message: "Authentication required" });
       }
       
       // If user is a student, they can only mark their own attendance
@@ -719,8 +1171,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
   
-  // Update a student
-  app.put("/api/students/:id", isAdmin, async (req, res, next) => {
+  // Update a student - support both PUT and PATCH for backward compatibility
+  app.put("/api/students/:id", isAdmin, updateStudent);
+  app.patch("/api/students/:id", isAdmin, updateStudent);
+
+  // Common handler for student updates
+  async function updateStudent(req: any, res: any, next: any) {
     try {
       const id = parseInt(req.params.id);
       
@@ -748,7 +1204,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       }
       next(error);
     }
-  });
+  }
   
   // Delete a student
   app.delete("/api/students/:id", isAdmin, async (req, res, next) => {
@@ -810,7 +1266,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
             id: record.id,
             lessonId: record.lessonId,
             subject: lesson.subject,
-            date: lesson.startTime,
+            date: (lesson.createdAt || new Date()).toISOString(),
             status: record.status,
             markedAt: record.markedAt
           };
@@ -847,20 +1303,36 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
   
-  // Get all students
-  app.get("/api/students", isAdmin, async (req, res) => {
+  // Get all students (with optional classId filter)
+  app.get("/api/students", isAuthenticated, async (req, res) => {
     try {
+      const classId = req.query.classId ? parseInt(req.query.classId as string) : undefined;
+      
+      // If user is a teacher, only allow access to students in classes they teach
+      if (req.user.role === "teacher" && classId) {
+        // Check if teacher teaches this class
+        const teacherLessons = await storage.getAllLessons(classId, req.user.id);
+        if (teacherLessons.length === 0) {
+          return res.status(403).json({ message: "You are not teaching any lessons in this class" });
+        }
+      }
+      
       // Get all users
       const allUsers = await storage.getAllUsers();
       
       // Filter to only students
-      const students = allUsers
+      let students = allUsers
         .filter(user => user.role === "student")
         .map(student => {
           // Remove password from response
           const { password, ...studentData } = student;
           return studentData;
         });
+      
+      // Filter by classId if provided
+      if (classId) {
+        students = students.filter(student => student.classId === classId);
+      }
       
       // Add class and department information
       const enrichedStudents = await Promise.all(
@@ -1004,6 +1476,138 @@ export async function registerRoutes(app: Express): Promise<Server> {
     } catch (error) {
       console.error("Error fetching recent attendance:", error);
       res.status(500).json({ message: "Failed to fetch recent attendance" });
+    }
+  });
+
+  // Add endpoint to clear all data (admin only)
+  app.post("/api/system/clear-data", isAdmin, async (req, res) => {
+    try {
+      // Verify the admin wants to clear all data
+      const { confirm } = req.body;
+      if (confirm !== 'yes-delete-all-data') {
+        return res.status(400).json({ 
+          success: false, 
+          message: "Please confirm data deletion by setting 'confirm' to 'yes-delete-all-data'" 
+        });
+      }
+      
+      // Only allow admins to clear data
+      if (req.user?.role !== 'admin') {
+        return res.status(403).json({ 
+          success: false, 
+          message: "Only administrators can clear system data" 
+        });
+      }
+
+      // Run the data clearing process
+      const result = await clearAllData();
+      
+      // Return the result
+      res.json(result);
+    } catch (error) {
+      console.error("Error clearing data:", error);
+      res.status(500).json({ 
+        success: false, 
+        message: "An error occurred while clearing data"
+      });
+    }
+  });
+  
+  // Backup and Restore API endpoints
+  
+  // List all available backups
+  app.get("/api/system/backups", isAdmin, async (req, res) => {
+    try {
+      const result = await listBackups();
+      res.json(result);
+    } catch (error) {
+      console.error("Error listing backups:", error);
+      res.status(500).json({ 
+        success: false, 
+        message: "An error occurred while listing backups"
+      });
+    }
+  });
+  
+  // Create a new backup
+  app.post("/api/system/backups", isAdmin, async (req, res) => {
+    try {
+      const { name } = req.body;
+      const result = await createBackup(name);
+      res.json(result);
+    } catch (error) {
+      console.error("Error creating backup:", error);
+      res.status(500).json({ 
+        success: false, 
+        message: "An error occurred while creating backup"
+      });
+    }
+  });
+  
+  // Restore from backup
+  app.post("/api/system/backups/restore", isAdmin, async (req, res) => {
+    try {
+      const { filename, confirm } = req.body;
+      
+      if (!filename) {
+        return res.status(400).json({ 
+          success: false, 
+          message: "Backup filename is required" 
+        });
+      }
+      
+      // Require confirmation for restore operation
+      if (confirm !== 'yes-restore-data') {
+        return res.status(400).json({ 
+          success: false, 
+          message: "Please confirm restore by setting 'confirm' to 'yes-restore-data'" 
+        });
+      }
+      
+      // Only allow admins to restore
+      if (req.user?.role !== 'admin') {
+        return res.status(403).json({ 
+          success: false, 
+          message: "Only administrators can restore system data" 
+        });
+      }
+      
+      // First create a backup of current state
+      await createBackup('pre-restore-backup');
+      
+      // Perform the restore
+      const result = await restoreFromBackup(filename);
+      res.json(result);
+    } catch (error) {
+      console.error("Error restoring from backup:", error);
+      res.status(500).json({ 
+        success: false, 
+        message: "An error occurred while restoring from backup"
+      });
+    }
+  });
+  
+  // Delete a backup
+  app.delete("/api/system/backups/:filename", isAdmin, async (req, res) => {
+    try {
+      const { filename } = req.params;
+      
+      // Reject deletion of pre-restore backups for safety
+      if (filename.startsWith('pre-restore-backup')) {
+        return res.status(400).json({ 
+          success: false, 
+          message: "Cannot delete pre-restore safety backups" 
+        });
+      }
+      
+      const result = await deleteBackup(filename);
+      res.json(result);
+    } catch (error) {
+      console.error("Error deleting backup:", error);
+      res.status(500).json({ 
+        success: false, 
+        message: "An error occurred while deleting backup"
+      });
     }
   });
 

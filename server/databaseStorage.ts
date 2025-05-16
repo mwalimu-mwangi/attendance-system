@@ -1,11 +1,12 @@
 import { IStorage } from "./storage";
 import { db } from "./db";
 import { 
-  users, departments, levels, classes, lessons, attendance, systemSettings,
+  users, departments, levels, classes, lessons, attendance, systemSettings, teacherDepartments,
   type User, type Department, type Level, type Class, type Lesson, type Attendance, type SystemSettings,
+  type TeacherDepartment, type InsertTeacherDepartment,
   type InsertUser, type InsertDepartment, type InsertLevel, type InsertClass, type InsertLesson, type InsertAttendance, type UpdateSystemSettings
 } from "@shared/schema";
-import { eq, and, desc, gte, lte, sql, count, lt, gt } from "drizzle-orm";
+import { eq, and, desc, gte, lte, sql, count, lt, gt, inArray } from "drizzle-orm";
 import { isToday } from "date-fns";
 import connectPg from "connect-pg-simple";
 import type * as sessionTypes from "express-session";
@@ -63,8 +64,31 @@ export class DatabaseStorage implements IStorage {
   }
 
   async deleteUser(id: number): Promise<boolean> {
-    const result = await db.delete(users).where(eq(users.id, id));
-    return !!result;
+    try {
+      // First, check for lessons taught by this teacher
+      const teacherLessons = await db.select().from(lessons).where(eq(lessons.teacherId, id));
+      
+      // If there are lessons, delete them first
+      if (teacherLessons.length > 0) {
+        for (const lesson of teacherLessons) {
+          // Delete associated attendance records
+          await db.delete(attendance).where(eq(attendance.lessonId, lesson.id));
+        }
+        
+        // Now delete all the lessons
+        await db.delete(lessons).where(eq(lessons.teacherId, id));
+      }
+      
+      // Delete teacher-department relationships
+      await db.delete(teacherDepartments).where(eq(teacherDepartments.teacherId, id));
+      
+      // Finally delete the user
+      const result = await db.delete(users).where(eq(users.id, id));
+      return true;
+    } catch (error) {
+      console.error("Error deleting user:", error);
+      return false;
+    }
   }
 
   async getAllUsers(): Promise<Omit<User, "password">[]> {
@@ -98,6 +122,98 @@ export class DatabaseStorage implements IStorage {
       .from(users)
       .where(eq(users.role, "teacher"));
     return teachers;
+  }
+  
+  // Teacher department relationships
+  async getTeacherDepartments(teacherId: number): Promise<TeacherDepartment[]> {
+    return await db
+      .select()
+      .from(teacherDepartments)
+      .where(eq(teacherDepartments.teacherId, teacherId));
+  }
+  
+  async addTeacherToDepartment(teacherId: number, departmentId: number): Promise<TeacherDepartment> {
+    const [relation] = await db
+      .insert(teacherDepartments)
+      .values({
+        teacherId,
+        departmentId
+      })
+      .returning();
+    return relation;
+  }
+  
+  async removeTeacherFromDepartment(teacherId: number, departmentId: number): Promise<boolean> {
+    const result = await db
+      .delete(teacherDepartments)
+      .where(and(
+        eq(teacherDepartments.teacherId, teacherId),
+        eq(teacherDepartments.departmentId, departmentId)
+      ));
+    return !!result;
+  }
+  
+  async getTeachersByDepartment(departmentId: number): Promise<Omit<User, "password">[]> {
+    // Get all teachers directly assigned to the department
+    const primaryTeachers = await db
+      .select({
+        id: users.id,
+        username: users.username,
+        fullName: users.fullName,
+        role: users.role,
+        departmentId: users.departmentId,
+        levelId: users.levelId,
+        classId: users.classId,
+        createdAt: users.createdAt
+      })
+      .from(users)
+      .where(
+        and(
+          eq(users.role, "teacher"),
+          eq(users.departmentId, departmentId)
+        )
+      );
+      
+    // Get teachers serving this department through teacherDepartments relation
+    const secondaryTeacherIds = await db
+      .select({
+        teacherId: teacherDepartments.teacherId
+      })
+      .from(teacherDepartments)
+      .where(eq(teacherDepartments.departmentId, departmentId));
+    
+    if (secondaryTeacherIds.length === 0) {
+      return primaryTeachers;
+    }
+    
+    const secondaryTeachers = await db
+      .select({
+        id: users.id,
+        username: users.username,
+        fullName: users.fullName,
+        role: users.role,
+        departmentId: users.departmentId,
+        levelId: users.levelId,
+        classId: users.classId,
+        createdAt: users.createdAt
+      })
+      .from(users)
+      .where(
+        and(
+          eq(users.role, "teacher"),
+          inArray(users.id, secondaryTeacherIds.map(t => t.teacherId))
+        )
+      );
+      
+    // Combine and remove duplicates
+    const allTeachers = [...primaryTeachers];
+    for (const teacher of secondaryTeachers) {
+      if (!allTeachers.some(t => t.id === teacher.id)) {
+        allTeachers.push(teacher);
+      }
+    }
+    
+    return allTeachers;
   }
 
   // Department methods
@@ -208,8 +324,33 @@ export class DatabaseStorage implements IStorage {
   }
 
   async deleteClass(id: number): Promise<boolean> {
-    const result = await db.delete(classes).where(eq(classes.id, id));
-    return !!result;
+    try {
+      // First check for lessons associated with this class
+      const classLessons = await db.select().from(lessons).where(eq(lessons.classId, id));
+      
+      // If there are lessons, delete them first
+      if (classLessons.length > 0) {
+        for (const lesson of classLessons) {
+          // Delete associated attendance records
+          await db.delete(attendance).where(eq(attendance.lessonId, lesson.id));
+        }
+        
+        // Now delete all the lessons
+        await db.delete(lessons).where(eq(lessons.classId, id));
+      }
+      
+      // Check for students in this class and update their classId to null
+      await db.update(users)
+        .set({ classId: null })
+        .where(eq(users.classId, id));
+      
+      // Finally delete the class
+      const result = await db.delete(classes).where(eq(classes.id, id));
+      return true;
+    } catch (error) {
+      console.error("Error deleting class:", error);
+      return false;
+    }
   }
 
   // Lesson methods
@@ -233,21 +374,8 @@ export class DatabaseStorage implements IStorage {
   }
 
   async createLesson(lessonData: InsertLesson): Promise<Lesson> {
-    // Calculate date objects for start_time and end_time
-    const now = new Date();
-    const dayDiff = lessonData.dayOfWeek - now.getDay();
-    const nearestDate = new Date(now);
-    nearestDate.setDate(now.getDate() + (dayDiff >= 0 ? dayDiff : dayDiff + 7));
-    
-    const hours = Math.floor(lessonData.startTimeMinutes / 60);
-    const minutes = lessonData.startTimeMinutes % 60;
-    
-    const startTime = new Date(nearestDate);
-    startTime.setHours(hours, minutes, 0, 0);
-    
-    const endTime = new Date(startTime);
-    endTime.setMinutes(startTime.getMinutes() + (lessonData.durationMinutes || 60));
-    
+    // Now we only need to handle nullable fields and use the native startTimeMinutes
+    // We no longer need to calculate start_time and end_time
     const [lesson] = await db
       .insert(lessons)
       .values({
@@ -255,8 +383,6 @@ export class DatabaseStorage implements IStorage {
         location: lessonData.location ?? null,
         attendanceWindowMinutes: lessonData.attendanceWindowMinutes ?? 30,
         isActive: lessonData.isActive ?? true,
-        start_time: startTime,
-        end_time: endTime
       })
       .returning();
     return lesson;
@@ -266,32 +392,6 @@ export class DatabaseStorage implements IStorage {
     // Fetch current lesson to get existing values
     const currentLesson = await this.getLesson(id);
     if (!currentLesson) return undefined;
-
-    // Calculate start_time and end_time if needed
-    let startTime = undefined;
-    let endTime = undefined;
-    
-    if (lessonData.dayOfWeek !== undefined || lessonData.startTimeMinutes !== undefined) {
-      // Get values to use (either new or existing)
-      const dayOfWeek = lessonData.dayOfWeek ?? currentLesson.dayOfWeek;
-      const startTimeMinutes = lessonData.startTimeMinutes ?? currentLesson.startTimeMinutes;
-      const durationMinutes = lessonData.durationMinutes ?? currentLesson.durationMinutes;
-      
-      // Calculate date objects for start_time and end_time
-      const now = new Date();
-      const dayDiff = dayOfWeek - now.getDay();
-      const nearestDate = new Date(now);
-      nearestDate.setDate(now.getDate() + (dayDiff >= 0 ? dayDiff : dayDiff + 7));
-      
-      const hours = Math.floor(startTimeMinutes / 60);
-      const minutes = startTimeMinutes % 60;
-      
-      startTime = new Date(nearestDate);
-      startTime.setHours(hours, minutes, 0, 0);
-      
-      endTime = new Date(startTime);
-      endTime.setMinutes(startTime.getMinutes() + durationMinutes);
-    }
     
     const [lesson] = await db
       .update(lessons)
@@ -299,8 +399,6 @@ export class DatabaseStorage implements IStorage {
         ...lessonData,
         location: lessonData.location === undefined ? undefined : (lessonData.location ?? null),
         isActive: lessonData.isActive === undefined ? undefined : (lessonData.isActive ?? null),
-        start_time: startTime,
-        end_time: endTime
       })
       .where(eq(lessons.id, id))
       .returning();
@@ -362,39 +460,52 @@ export class DatabaseStorage implements IStorage {
   }
 
   async markAttendance(attendanceData: InsertAttendance): Promise<Attendance> {
-    // Check if attendance record already exists
-    const [existingRecord] = await db
-      .select()
-      .from(attendance)
-      .where(and(
-        eq(attendance.lessonId, attendanceData.lessonId),
-        eq(attendance.studentId, attendanceData.studentId)
-      ));
-    
-    if (existingRecord) {
-      // Update existing record
-      const [updated] = await db
-        .update(attendance)
-        .set({
-          status: attendanceData.status,
-          markedAt: new Date()
-        })
+    try {
+      // Check if attendance record already exists
+      const existingRecords = await db
+        .select()
+        .from(attendance)
         .where(and(
           eq(attendance.lessonId, attendanceData.lessonId),
           eq(attendance.studentId, attendanceData.studentId)
-        ))
-        .returning();
-      return updated;
-    } else {
-      // Create new record
-      const [newRecord] = await db
-        .insert(attendance)
-        .values({
-          ...attendanceData,
-          markedAt: new Date()
-        })
-        .returning();
-      return newRecord;
+        ));
+      
+      if (existingRecords && existingRecords.length > 0) {
+        // If multiple records exist (which shouldn't happen but let's handle it),
+        // delete all but the first one
+        if (existingRecords.length > 1) {
+          // Keep the first record, delete the rest
+          for (let i = 1; i < existingRecords.length; i++) {
+            await db.delete(attendance).where(eq(attendance.id, existingRecords[i].id));
+          }
+        }
+        
+        // Update the remaining record
+        const [updated] = await db
+          .update(attendance)
+          .set({
+            status: attendanceData.status,
+            markedAt: new Date()
+          })
+          .where(eq(attendance.id, existingRecords[0].id))
+          .returning();
+        
+        return updated;
+      } else {
+        // Create new record
+        const [newRecord] = await db
+          .insert(attendance)
+          .values({
+            ...attendanceData,
+            markedAt: new Date()
+          })
+          .returning();
+        
+        return newRecord;
+      }
+    } catch (error) {
+      console.error("Error marking attendance:", error);
+      throw error;
     }
   }
 
@@ -504,14 +615,21 @@ export class DatabaseStorage implements IStorage {
     
     // Get number of students in the class(es)
     const classIds = [...new Set(teacherLessons.map(lesson => lesson.classId))];
-    const totalStudents = await db
+    
+    // Make sure we can handle empty arrays
+    let studentsQuery = db
       .select({ count: count() })
       .from(users)
-      .where(and(
-        eq(users.role, "student"),
-        sql`${users.classId} IN ${classIds}`
-      ))
-      .then(result => result[0]?.count || 0);
+      .where(eq(users.role, "student"));
+      
+    if (classIds.length > 0) {
+      studentsQuery = studentsQuery.where(sql`${users.classId} IN ${classIds}`);
+    } else {
+      // If no classes found, still query for students but ensure we get 0 results
+      studentsQuery = studentsQuery.where(eq(users.classId, -1));
+    }
+    
+    const totalStudents = await studentsQuery.then(result => result[0]?.count || 0);
     
     // Find students with low attendance
     const studentAttendance = await db

@@ -10,11 +10,32 @@ export const users = pgTable("users", {
   password: text("password").notNull(),
   fullName: text("full_name").notNull(),
   role: text("role", { enum: ["admin", "teacher", "student"] }).notNull(),
-  departmentId: integer("department_id"),
+  departmentId: integer("department_id"),  // Primary department for teachers/students
   levelId: integer("level_id"),
   classId: integer("class_id"),
   createdAt: timestamp("created_at").defaultNow(),
 });
+
+// Teacher-Department relationships (for multiple departments)
+export const teacherDepartments = pgTable("teacher_departments", {
+  id: serial("id").primaryKey(),
+  teacherId: integer("teacher_id").notNull(),
+  departmentId: integer("department_id").notNull(),
+  createdAt: timestamp("created_at").defaultNow(),
+}, (table) => {
+  return {
+    // Ensure each teacher-department combination is unique
+    uniqTeacherDepartment: unique().on(table.teacherId, table.departmentId)
+  };
+});
+
+export const insertTeacherDepartmentSchema = createInsertSchema(teacherDepartments).omit({
+  id: true,
+  createdAt: true,
+});
+
+export type InsertTeacherDepartment = z.infer<typeof insertTeacherDepartmentSchema>;
+export type TeacherDepartment = typeof teacherDepartments.$inferSelect;
 
 export const insertUserSchema = createInsertSchema(users).omit({
   id: true,
@@ -238,7 +259,8 @@ export const studentRegistrationSchema = z.object({
 export type StudentRegistration = z.infer<typeof studentRegistrationSchema>;
 
 // Define relations
-export const usersRelations = relations(users, ({ one }) => ({
+export const usersRelations = relations(users, ({ one, many }) => ({
+  // Primary department
   department: one(departments, {
     fields: [users.departmentId],
     references: [departments.id],
@@ -251,11 +273,26 @@ export const usersRelations = relations(users, ({ one }) => ({
     fields: [users.classId],
     references: [classes.id],
   }),
+  // For teachers who serve multiple departments
+  teacherDepartments: many(teacherDepartments, { relationName: "teacherToDepartments" }),
+}));
+
+export const teacherDepartmentsRelations = relations(teacherDepartments, ({ one }) => ({
+  teacher: one(users, {
+    fields: [teacherDepartments.teacherId],
+    references: [users.id],
+    relationName: "teacherToDepartments",
+  }),
+  department: one(departments, {
+    fields: [teacherDepartments.departmentId],
+    references: [departments.id],
+  }),
 }));
 
 export const departmentsRelations = relations(departments, ({ many }) => ({
   users: many(users),
   classes: many(classes),
+  teacherDepartments: many(teacherDepartments),
 }));
 
 export const levelsRelations = relations(levels, ({ many }) => ({

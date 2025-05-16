@@ -23,7 +23,7 @@ export async function hashPassword(password: string) {
   return `${buf.toString("hex")}.${salt}`;
 }
 
-async function comparePasswords(supplied: string, stored: string) {
+export async function comparePasswords(supplied: string, stored: string) {
   // Check if stored password is in expected format (has salt)
   if (!stored || !stored.includes(".")) {
     // Handle passwords that might be stored in plain text during development/testing
@@ -252,6 +252,51 @@ export function setupAuth(app: Express) {
     const { password, ...userResponse } = req.user;
     res.json(userResponse);
   });
+
+  // Update user profile
+  app.patch("/api/user/profile", async (req, res) => {
+    try {
+      if (!req.isAuthenticated()) {
+        return res.status(401).json({ message: "Unauthorized" });
+      }
+      
+      const { fullName, currentPassword, newPassword } = req.body;
+      
+      // Updating user data
+      let updateData: any = { fullName };
+      
+      // If updating password
+      if (currentPassword && newPassword) {
+        // Verify current password
+        const user = await storage.getUser(req.user.id);
+        if (!user) {
+          return res.status(404).json({ message: "User not found" });
+        }
+        
+        const passwordMatches = await comparePasswords(currentPassword, user.password);
+        if (!passwordMatches) {
+          return res.status(400).json({ message: "Current password is incorrect" });
+        }
+        
+        // Hash new password
+        updateData.password = await hashPassword(newPassword);
+      }
+      
+      // Update user profile
+      const updatedUser = await storage.updateUser(req.user.id, updateData);
+      
+      if (!updatedUser) {
+        return res.status(404).json({ message: "User not found" });
+      }
+      
+      // Remove password from response
+      const { password, ...userResponse } = updatedUser;
+      res.json(userResponse);
+    } catch (error) {
+      console.error("Error updating profile:", error);
+      res.status(500).json({ message: "Failed to update profile" });
+    }
+  });
 }
 
 // Middleware to check if user has admin role
@@ -295,9 +340,10 @@ export function isStudent(req: any, res: any, next: any) {
 
 // Middleware to check if user is authenticated
 export function isAuthenticated(req: any, res: any, next: any) {
-  if (!req.isAuthenticated()) {
+  if (!req.isAuthenticated() || !req.user) {
     return res.status(401).json({ message: "Unauthorized" });
   }
   
+  // TypeScript: req.user is guaranteed to exist after this middleware
   next();
 }
